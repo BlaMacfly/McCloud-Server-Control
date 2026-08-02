@@ -19,8 +19,10 @@ le code.
 - 🔍 Détection automatique des piles présentes dans `/opt/stacks`
 - 📊 État global du serveur (services, température, disques) avec `!status`
 - 📄 Consultation des logs des conteneurs depuis Discord
-- 🌡️ Alerte automatique en cas de température CPU critique (lecture directe
-  de `/sys/class/hwmon`, sans `lm-sensors`)
+- 🎮 Gestion de serveurs de jeux installés localement (détection automatique,
+  lancement via `systemd-run`, sans `tmux`)
+- 🌡️ Alerte automatique en cas de température CPU critique, via webhook Discord
+  ou salon dédié (lecture directe de `/sys/class/hwmon`, sans `lm-sensors`)
 - 💾 Suivi de l'espace disque (`/` et `/mnt/multimedia`)
 - 🔒 Liste blanche optionnelle d'utilisateurs Discord autorisés
 - 📦 Configuration via `.env`, aucun secret dans le code
@@ -35,7 +37,10 @@ le code.
 | `!restart <pile>`     | Redémarre une pile (`!restart nextcloud`)             |
 | `!update <pile>`      | Met à jour les images et relance la pile              |
 | `!logs <pile> [n]`    | Affiche les `n` dernières lignes de logs (20 défaut)  |
-| `!status`             | État des services, température CPU et disques         |
+| `!games`              | Liste les serveurs de jeux et leur état               |
+| `!gstart <jeu>`       | Démarre un serveur de jeu (`!gstart palworld`)        |
+| `!gstop <jeu>`        | Arrête un serveur de jeu (`!gstop palworld`)          |
+| `!status`             | État des services, jeux, température CPU et disques   |
 | `!temp`               | Température CPU actuelle                              |
 | `!disk`               | Espace disque des volumes surveillés                  |
 
@@ -62,6 +67,23 @@ source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # puis renseignez DISCORD_TOKEN et les salons
 ```
+
+## 🎮 Serveurs de jeux
+
+Chaque serveur de jeu s'installe dans son propre sous-dossier de
+`GAME_SERVERS_DIR` (par défaut `~/Bureau/GameServers`) avec un script
+`start.sh` exécutable qui lance le serveur :
+
+```
+GameServers/
+├── palworld/
+│   └── start.sh
+└── minecraft/
+    └── start.sh
+```
+
+Le bot les détecte automatiquement et les pilote avec `!gstart` / `!gstop`
+(exécution en unité systemd utilisateur, pas besoin de `tmux`).
 
 ## 🚀 Utilisation
 

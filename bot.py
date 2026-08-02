@@ -1,8 +1,9 @@
 """McCloud Server Control — bot Discord de pilotage du serveur McCloud.
 
-Gère les piles Docker Compose de /opt/stacks (Caddy, NextCloud, Jellyfin…),
-surveille la température CPU (k10temp via /sys/class/hwmon, sans lm-sensors)
-et l'espace disque. Conçu pour Debian 13.
+Gère les piles Docker Compose de /opt/stacks (Caddy, NextCloud, Jellyfin…)
+et les serveurs de jeux installés sur le Bureau, surveille la température CPU
+(k10temp via /sys/class/hwmon, sans lm-sensors) et l'espace disque.
+Conçu pour Debian 13.
 """
 
 import asyncio
@@ -10,6 +11,7 @@ import os
 import shutil
 from pathlib import Path
 
+import aiohttp
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
@@ -18,11 +20,14 @@ load_dotenv()
 
 # ⚙️ Configuration (voir .env.example)
 TOKEN = os.getenv("DISCORD_TOKEN")
-TEMP_LOG_CHANNEL_ID = int(os.getenv("TEMP_LOG_CHANNEL_ID", "0"))
-TEMP_CRITICAL_THRESHOLD = float(os.getenv("TEMP_CRITICAL_THRESHOLD", "80"))
-TEMP_CHECK_MINUTES = int(os.getenv("TEMP_CHECK_MINUTES", "10"))
-STACKS_DIR = Path(os.getenv("STACKS_DIR", "/opt/stacks"))
-DISKS = [p for p in os.getenv("DISKS", "/,/mnt/multimedia").split(",") if p]
+TEMP_LOG_CHANNEL_ID = int(os.getenv("TEMP_LOG_CHANNEL_ID") or 0)
+TEMP_WEBHOOK_URL = os.getenv("TEMP_WEBHOOK_URL", "")
+TEMP_CRITICAL_THRESHOLD = float(os.getenv("TEMP_CRITICAL_THRESHOLD") or 80)
+TEMP_CHECK_MINUTES = int(os.getenv("TEMP_CHECK_MINUTES") or 10)
+STACKS_DIR = Path(os.getenv("STACKS_DIR") or "/opt/stacks")
+GAME_SERVERS_DIR = Path(os.getenv("GAME_SERVERS_DIR") or str(Path.home() / "Bureau/GameServers"))
+GAME_START_SCRIPT = "start.sh"
+DISKS = [p for p in (os.getenv("DISKS") or "/,/mnt/multimedia").split(",") if p]
 
 # 🔒 IDs Discord autorisés à piloter les services (vide = tout le monde)
 ALLOWED_USER_IDS = {
@@ -107,6 +112,26 @@ def get_disk_usage() -> list[tuple[str, float, float, float]]:
             continue
         usage.append((mount, total / 1e9, used / 1e9, used / total * 100))
     return usage
+
+
+### 🎮 Serveurs de jeux (sur le Bureau, hors disque externe) ###
+def discover_games() -> dict[str, Path]:
+    """Détecte les serveurs de jeux : sous-dossiers de GAME_SERVERS_DIR avec un start.sh."""
+    games = {}
+    if GAME_SERVERS_DIR.is_dir():
+        for d in sorted(GAME_SERVERS_DIR.iterdir()):
+            if d.is_dir() and (d / GAME_START_SCRIPT).is_file():
+                games[d.name.lower()] = d
+    return games
+
+
+def game_unit(name: str) -> str:
+    return f"game-{name}"
+
+
+async def game_running(name: str) -> bool:
+    code, _ = await run_cmd("systemctl", "--user", "is-active", "--quiet", game_unit(name), timeout=10)
+    return code == 0
 
 
 ### 🔒 Contrôle d'accès ###
@@ -216,6 +241,66 @@ async def logs(ctx: commands.Context, name: str, lines: int = 20):
     await ctx.send(f"📄 **Logs de `{stack.name}` :**\n```{clip(output)}```")
 
 
+@bot.command(name="games")
+async def games_cmd(ctx: commands.Context):
+    """Liste les serveurs de jeux disponibles"""
+    games = discover_games()
+    if not games:
+        await ctx.send(
+            f"❌ **Aucun serveur de jeu trouvé.** Placez chaque jeu dans "
+            f"`{GAME_SERVERS_DIR}/<nom>/` avec un script `{GAME_START_SCRIPT}`."
+        )
+        return
+    lines = []
+    for name in games:
+        icon = "🟢" if await game_running(name) else "🔴"
+        lines.append(f"{icon} `{name}`")
+    await ctx.send("🎮 **Serveurs de jeux :**\n" + "\n".join(lines))
+
+
+@bot.command()
+@authorized()
+async def gstart(ctx: commands.Context, name: str):
+    """Démarre un serveur de jeu : !gstart palworld"""
+    games = discover_games()
+    game = games.get(name.lower())
+    if game is None:
+        available = ", ".join(f"`{g}`" for g in games) or "aucun"
+        await ctx.send(f"⚠️ **Jeu `{name}` introuvable.** Disponibles : {available}")
+        return
+    if await game_running(game.name.lower()):
+        await ctx.send(f"⚠️ **Le serveur `{game.name}` tourne déjà !**")
+        return
+    await ctx.send(f"🟢 **Démarrage de `{game.name}`…**")
+    await run_cmd("systemctl", "--user", "reset-failed", game_unit(game.name.lower()), timeout=10)
+    code, output = await run_cmd(
+        "systemd-run", "--user", "--collect",
+        f"--unit={game_unit(game.name.lower())}",
+        f"--working-directory={game}",
+        str(game / GAME_START_SCRIPT),
+        timeout=30,
+    )
+    if code == 0:
+        await ctx.send(f"✅ **Serveur `{game.name}` lancé !**")
+    else:
+        await ctx.send(f"❌ **Échec du lancement :**\n```{clip(output)}```")
+
+
+@bot.command()
+@authorized()
+async def gstop(ctx: commands.Context, name: str):
+    """Arrête un serveur de jeu : !gstop palworld"""
+    if not await game_running(name.lower()):
+        await ctx.send(f"⚠️ **Le serveur `{name}` n'est pas en cours d'exécution !**")
+        return
+    await ctx.send(f"🛑 **Arrêt de `{name}`…**")
+    code, output = await run_cmd("systemctl", "--user", "stop", game_unit(name.lower()), timeout=60)
+    if code == 0:
+        await ctx.send(f"✅ **Serveur `{name}` arrêté !**")
+    else:
+        await ctx.send(f"❌ **Échec de l'arrêt :**\n```{clip(output)}```")
+
+
 @bot.command()
 async def status(ctx: commands.Context):
     """État des services, température et disques"""
@@ -236,6 +321,14 @@ async def status(ctx: commands.Context):
         embed.add_field(name="🐳 Services", value="\n".join(report), inline=False)
     else:
         embed.add_field(name="🐳 Services", value="Aucune pile trouvée", inline=False)
+
+    games = discover_games()
+    if games:
+        report = []
+        for name in games:
+            icon = "🟢" if await game_running(name) else "🔴"
+            report.append(f"{icon} `{name}`")
+        embed.add_field(name="🎮 Serveurs de jeux", value="\n".join(report), inline=False)
 
     temp = get_cpu_temp()
     if temp is not None:
@@ -279,23 +372,34 @@ async def disk(ctx: commands.Context):
 
 
 ### 🌡️ Surveillance automatique ###
+async def send_temp_alert(message: str):
+    """Envoie une alerte via le webhook dédié, sinon dans le salon configuré."""
+    if TEMP_WEBHOOK_URL:
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.post(TEMP_WEBHOOK_URL, json={"content": message})
+            return
+        except aiohttp.ClientError as e:
+            print(f"❌ Webhook température injoignable : {e}")
+    channel = bot.get_channel(TEMP_LOG_CHANNEL_ID)
+    if channel is not None:
+        await channel.send(message)
+
+
 @tasks.loop(minutes=TEMP_CHECK_MINUTES)
 async def monitor_temp():
-    channel = bot.get_channel(TEMP_LOG_CHANNEL_ID)
-    if channel is None:
-        return
     temperature = get_cpu_temp()
     if temperature is None:
         return
     # N'alerte qu'au-delà du seuil critique pour ne pas inonder le salon.
     if temperature >= TEMP_CRITICAL_THRESHOLD:
-        await channel.send(f"🚨 **ALERTE : température critique ({temperature:.1f}°C) !**")
+        await send_temp_alert(f"🚨 **ALERTE : température critique ({temperature:.1f}°C) !**")
 
 
 @bot.event
 async def on_ready():
     print(f"{bot.user} est connecté et surveille McCloud !")
-    if TEMP_LOG_CHANNEL_ID and not monitor_temp.is_running():
+    if (TEMP_WEBHOOK_URL or TEMP_LOG_CHANNEL_ID) and not monitor_temp.is_running():
         monitor_temp.start()
 
 
