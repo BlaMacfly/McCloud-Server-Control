@@ -159,7 +159,15 @@ async def backup_game(game: Path) -> tuple[Path, float] | None:
     # Rotation : ne garde que les BACKUP_KEEP archives les plus récentes.
     for old in sorted(dest.glob("*.tar.gz"))[:-BACKUP_KEEP]:
         old.unlink()
-    return archive, archive.stat().st_size / 1e6
+    return archive, archive.stat().st_size
+
+
+def human_size(size_bytes: float) -> str:
+    if size_bytes >= 1e9:
+        return f"{size_bytes / 1e9:.1f} Go"
+    if size_bytes >= 1e6:
+        return f"{size_bytes / 1e6:.1f} Mo"
+    return f"{size_bytes / 1e3:.0f} Ko"
 
 
 def get_lan_ip() -> str:
@@ -294,7 +302,7 @@ async def do_stop(ctx: commands.Context, game: Path):
     backup = await backup_game(game)
     if backup:
         archive, size = backup
-        await ctx.send(f"✅ **Backup créé : `{archive.name}` ({size:.0f} Mo)**")
+        await ctx.send(f"✅ **Backup créé : `{archive.name}` ({human_size(size)})**")
     else:
         await ctx.send(f"⚠️ **Rien à sauvegarder pour `{game.name}`.**")
 
