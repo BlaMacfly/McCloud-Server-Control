@@ -10,6 +10,7 @@ import asyncio
 import os
 import shutil
 import socket
+from datetime import datetime
 from pathlib import Path
 
 import aiohttp
@@ -27,7 +28,10 @@ TEMP_CRITICAL_THRESHOLD = float(os.getenv("TEMP_CRITICAL_THRESHOLD") or 80)
 TEMP_CHECK_MINUTES = int(os.getenv("TEMP_CHECK_MINUTES") or 10)
 GAME_SERVERS_DIR = Path(os.getenv("GAME_SERVERS_DIR") or str(Path.home() / "Bureau/GameServers"))
 GAME_START_SCRIPT = "start.sh"
-GAME_PORTS_FILE = "ports.conf"
+GAME_CONF_FILE = "game.conf"
+STEAMCMD = Path(os.getenv("STEAMCMD") or str(GAME_SERVERS_DIR / "steamcmd/steamcmd.sh"))
+BACKUP_DIR = Path(os.getenv("BACKUP_DIR") or str(GAME_SERVERS_DIR / "backups"))
+BACKUP_KEEP = int(os.getenv("BACKUP_KEEP") or 10)
 UPNPC = shutil.which("upnpc")
 DISKS = [p for p in (os.getenv("DISKS") or "/,/mnt/multimedia").split(",") if p]
 
@@ -84,16 +88,78 @@ async def game_running(name: str) -> bool:
     return code == 0
 
 
+def game_conf(game: Path) -> dict[str, str]:
+    """Lit le game.conf du jeu (APPID, PLATFORM, PORTS, SAVE_DIRS)."""
+    conf_file = game / GAME_CONF_FILE
+    conf = {}
+    if conf_file.is_file():
+        for line in conf_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                conf[key.strip().upper()] = value.strip()
+    return conf
+
+
 def game_ports(game: Path) -> list[tuple[int, str]]:
-    """Lit les ports du jeu depuis ports.conf (format : 8211/udp, un par ligne)."""
-    ports_file = game / GAME_PORTS_FILE
+    """Ports déclarés dans game.conf (PORTS=8211/udp 2456/udp)."""
     ports = []
-    if ports_file.is_file():
-        for entry in ports_file.read_text().split():
-            port, _, proto = entry.partition("/")
-            if port.isdigit() and proto.upper() in ("TCP", "UDP"):
-                ports.append((int(port), proto.upper()))
+    for entry in game_conf(game).get("PORTS", "").split():
+        port, _, proto = entry.partition("/")
+        if port.isdigit() and proto.upper() in ("TCP", "UDP"):
+            ports.append((int(port), proto.upper()))
     return ports
+
+
+async def update_game(game: Path) -> tuple[str, str]:
+    """Met à jour le jeu via SteamCMD. Retourne (résultat, message).
+
+    Sans « validate » : SteamCMD ne touche qu'aux fichiers du dépôt Steam,
+    jamais aux configurations locales (PalWorldSettings.ini, start.sh,
+    enshrouded_server.json… ne sont pas dans le dépôt).
+    """
+    appid = game_conf(game).get("APPID")
+    if not appid:
+        return "skip", ""
+    if not STEAMCMD.is_file():
+        return "error", "⚠️ **SteamCMD introuvable, lancement sans mise à jour.**"
+    platform = game_conf(game).get("PLATFORM", "linux")
+    code, output = await run_cmd(
+        "bash", str(STEAMCMD),
+        f"+@sSteamCmdForcePlatformType {platform}",
+        "+force_install_dir", str(game),
+        "+login", "anonymous",
+        "+app_update", appid,
+        "+quit",
+        timeout=1800,
+    )
+    lower = output.lower()
+    if code == 0 and "already up to date" in lower:
+        return "uptodate", f"✅ **`{game.name}` est déjà à jour.**"
+    if code == 0 and "fully installed" in lower:
+        return "updated", f"⬆️ **Mise à jour de `{game.name}` appliquée !**"
+    return "error", f"⚠️ **Vérification de mise à jour échouée, lancement quand même :**\n```{clip(output, 400)}```"
+
+
+async def backup_game(game: Path) -> tuple[Path, float] | None:
+    """Archive les sauvegardes du jeu (SAVE_DIRS) dans BACKUP_DIR, garde les N dernières."""
+    targets = [t for t in game_conf(game).get("SAVE_DIRS", "").split() if (game / t).exists()]
+    if not targets:
+        return None
+    dest = BACKUP_DIR / game.name
+    dest.mkdir(parents=True, exist_ok=True)
+    archive = dest / f"{game.name}_{datetime.now():%Y-%m-%d_%H%M%S}.tar.gz"
+    code, output = await run_cmd(
+        "tar", "czf", str(archive), "-C", str(game), *targets, timeout=600
+    )
+    if code != 0:
+        archive.unlink(missing_ok=True)
+        print(f"❌ Backup {game.name} échoué : {output}")
+        return None
+    # Rotation : ne garde que les BACKUP_KEEP archives les plus récentes.
+    for old in sorted(dest.glob("*.tar.gz"))[:-BACKUP_KEEP]:
+        old.unlink()
+    return archive, archive.stat().st_size / 1e6
 
 
 def get_lan_ip() -> str:
@@ -199,16 +265,13 @@ async def games_cmd(ctx: commands.Context):
     await ctx.send("🎮 **Serveurs de jeux :**\n" + "\n".join(lines))
 
 
-@bot.command()
-@authorized()
-async def start(ctx: commands.Context, name: str):
-    """Démarre un serveur de jeu : !start palworld"""
-    game = await require_game(ctx, name)
-    if game is None:
-        return
-    if await game_running(game.name.lower()):
-        await ctx.send(f"⚠️ **Le serveur `{game.name}` tourne déjà !**")
-        return
+async def do_start(ctx: commands.Context, game: Path):
+    """Vérifie les mises à jour puis lance le serveur."""
+    if game_conf(game).get("APPID"):
+        await ctx.send(f"🔄 **Vérification des mises à jour de `{game.name}`…**")
+        _, message = await update_game(game)
+        if message:
+            await ctx.send(message)
     await ctx.send(f"🟢 **Démarrage de `{game.name}`…**")
     code, output = await launch_game(game)
     if code == 0:
@@ -219,41 +282,59 @@ async def start(ctx: commands.Context, name: str):
         await ctx.send(f"❌ **Échec du lancement :**\n```{clip(output)}```")
 
 
-@bot.command()
-@authorized()
-async def stop(ctx: commands.Context, name: str):
-    """Arrête un serveur de jeu : !stop palworld"""
-    game = await require_game(ctx, name)
-    if game is None:
-        return
-    name = game.name.lower()
-    if not await game_running(name):
-        await ctx.send(f"⚠️ **Le serveur `{name}` n'est pas en cours d'exécution !**")
-        return
-    await ctx.send(f"🛑 **Arrêt de `{name}`…**")
-    code, output = await run_cmd("systemctl", "--user", "stop", game_unit(name), timeout=90)
+async def do_stop(ctx: commands.Context, game: Path):
+    """Sauvegarde puis arrête le serveur."""
+    await ctx.send(f"💾 **Sauvegarde de `{game.name}`…**")
+    backup = await backup_game(game)
+    if backup:
+        archive, size = backup
+        await ctx.send(f"✅ **Backup créé : `{archive.name}` ({size:.0f} Mo)**")
+    else:
+        await ctx.send(f"⚠️ **Rien à sauvegarder pour `{game.name}`.**")
+    await ctx.send(f"🛑 **Arrêt de `{game.name}`…**")
+    code, output = await run_cmd("systemctl", "--user", "stop", game_unit(game.name.lower()), timeout=90)
     if code == 0:
-        await ctx.send(f"✅ **Serveur `{name}` arrêté !**")
+        await ctx.send(f"✅ **Serveur `{game.name}` arrêté !**")
     else:
         await ctx.send(f"❌ **Échec de l'arrêt :**\n```{clip(output)}```")
 
 
 @bot.command()
 @authorized()
-async def restart(ctx: commands.Context, name: str):
-    """Redémarre un serveur de jeu : !restart palworld"""
+async def start(ctx: commands.Context, name: str):
+    """Met à jour puis démarre un serveur : !start palworld"""
     game = await require_game(ctx, name)
     if game is None:
         return
     if await game_running(game.name.lower()):
-        await ctx.send(f"🛑 **Arrêt de `{game.name}`…**")
-        await run_cmd("systemctl", "--user", "stop", game_unit(game.name.lower()), timeout=90)
-    await ctx.send(f"🟢 **Démarrage de `{game.name}`…**")
-    code, output = await launch_game(game)
-    if code == 0:
-        await ctx.send(f"✅ **Serveur `{game.name}` relancé !**")
-    else:
-        await ctx.send(f"❌ **Échec du lancement :**\n```{clip(output)}```")
+        await ctx.send(f"⚠️ **Le serveur `{game.name}` tourne déjà !**")
+        return
+    await do_start(ctx, game)
+
+
+@bot.command()
+@authorized()
+async def stop(ctx: commands.Context, name: str):
+    """Sauvegarde puis arrête un serveur : !stop palworld"""
+    game = await require_game(ctx, name)
+    if game is None:
+        return
+    if not await game_running(game.name.lower()):
+        await ctx.send(f"⚠️ **Le serveur `{game.name}` n'est pas en cours d'exécution !**")
+        return
+    await do_stop(ctx, game)
+
+
+@bot.command()
+@authorized()
+async def restart(ctx: commands.Context, name: str):
+    """Sauvegarde, met à jour et relance un serveur : !restart palworld"""
+    game = await require_game(ctx, name)
+    if game is None:
+        return
+    if await game_running(game.name.lower()):
+        await do_stop(ctx, game)
+    await do_start(ctx, game)
 
 
 @bot.command()

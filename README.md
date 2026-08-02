@@ -16,6 +16,10 @@ sans modifier le code.
 ## ⚙️ Fonctionnalités principales
 
 - 🎮 Lancement, arrêt et redémarrage des serveurs de jeux via Discord
+- ⬆️ Vérification et application des mises à jour SteamCMD à chaque `!start`
+  (sans `validate` : les configurations locales ne sont jamais écrasées)
+- 💾 Backup automatique des sauvegardes à chaque `!stop` (rotation, 10 archives
+  conservées par jeu)
 - 🔍 Détection automatique des jeux installés (un dossier + un `start.sh`)
 - 🧰 Exécution en unités systemd utilisateur — pas besoin de `tmux` ni de root
 - 🔓 Ouverture automatique des ports sur la box via UPnP au lancement d'un
@@ -34,9 +38,9 @@ sans modifier le code.
 | Commande            | Action                                                 |
 |---------------------|--------------------------------------------------------|
 | `!games`            | Liste les serveurs de jeux et leur état                |
-| `!start <jeu>`      | Démarre un serveur (`!start palworld`)                 |
-| `!stop <jeu>`       | Arrête un serveur (`!stop palworld`)                   |
-| `!restart <jeu>`    | Redémarre un serveur (`!restart palworld`)             |
+| `!start <jeu>`      | Met à jour puis démarre un serveur (`!start palworld`) |
+| `!stop <jeu>`       | Sauvegarde puis arrête un serveur (`!stop palworld`)   |
+| `!restart <jeu>`    | Sauvegarde, met à jour et relance (`!restart palworld`)|
 | `!logs <jeu> [n]`   | Affiche les `n` dernières lignes de logs (20 défaut)   |
 | `!status`           | État des serveurs, température CPU et disques          |
 | `!temp`             | Température CPU actuelle                               |
@@ -52,11 +56,22 @@ Chaque serveur de jeu s'installe dans son propre sous-dossier de
 
 ```
 GameServers/
+├── steamcmd/          # SteamCMD partagé (mises à jour)
+├── backups/           # archives créées à chaque !stop
 ├── palworld/
 │   ├── start.sh
-│   └── ports.conf     # 8211/udp — ouvert via UPnP pendant que le serveur tourne
+│   └── game.conf
 └── minecraft/
     └── start.sh
+```
+
+Le fichier `game.conf` (optionnel) décrit le jeu :
+
+```ini
+APPID=2394010          # AppID Steam du serveur dédié (mise à jour au !start)
+PLATFORM=linux         # linux ou windows (windows = serveur lancé via Wine)
+PORTS=8211/udp         # ports ouverts via UPnP pendant que le serveur tourne
+SAVE_DIRS=Pal/Saved    # dossiers/fichiers archivés à chaque !stop
 ```
 
 Exemple de `start.sh` pour Minecraft Bedrock :
