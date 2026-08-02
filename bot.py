@@ -1,7 +1,7 @@
-"""McCloud Server Control — bot Discord de pilotage du serveur McCloud.
+"""McCloud Server Control — bot Discord de gestion des serveurs de jeux.
 
-Gère les piles Docker Compose de /opt/stacks (Caddy, NextCloud, Jellyfin…)
-et les serveurs de jeux installés sur le Bureau, surveille la température CPU
+Lance, arrête et surveille les serveurs de jeux installés sur le Bureau
+(un sous-dossier par jeu avec un start.sh), surveille la température CPU
 (k10temp via /sys/class/hwmon, sans lm-sensors) et l'espace disque.
 Conçu pour Debian 13.
 """
@@ -24,35 +24,22 @@ TEMP_LOG_CHANNEL_ID = int(os.getenv("TEMP_LOG_CHANNEL_ID") or 0)
 TEMP_WEBHOOK_URL = os.getenv("TEMP_WEBHOOK_URL", "")
 TEMP_CRITICAL_THRESHOLD = float(os.getenv("TEMP_CRITICAL_THRESHOLD") or 80)
 TEMP_CHECK_MINUTES = int(os.getenv("TEMP_CHECK_MINUTES") or 10)
-STACKS_DIR = Path(os.getenv("STACKS_DIR") or "/opt/stacks")
 GAME_SERVERS_DIR = Path(os.getenv("GAME_SERVERS_DIR") or str(Path.home() / "Bureau/GameServers"))
 GAME_START_SCRIPT = "start.sh"
 DISKS = [p for p in (os.getenv("DISKS") or "/,/mnt/multimedia").split(",") if p]
 
-# 🔒 IDs Discord autorisés à piloter les services (vide = tout le monde)
+# 🔒 IDs Discord autorisés à piloter les serveurs (vide = tout le monde)
 ALLOWED_USER_IDS = {
     int(i) for i in os.getenv("ALLOWED_USER_IDS", "").split(",") if i.strip()
 }
-
-COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-### 🐳 Piles Docker Compose ###
-def discover_stacks() -> dict[str, Path]:
-    """Détecte les piles Docker Compose présentes dans STACKS_DIR."""
-    stacks = {}
-    if STACKS_DIR.is_dir():
-        for d in sorted(STACKS_DIR.iterdir()):
-            if d.is_dir() and any((d / f).is_file() for f in COMPOSE_FILES):
-                stacks[d.name] = d
-    return stacks
-
-
-async def run_cmd(*args: str, cwd: Path | None = None, timeout: int = 300) -> tuple[int, str]:
+### 🔧 Utilitaires ###
+async def run_cmd(*args: str, cwd: Path | None = None, timeout: int = 120) -> tuple[int, str]:
     """Exécute une commande sans bloquer la boucle d'événements."""
     proc = await asyncio.create_subprocess_exec(
         *args,
@@ -69,17 +56,41 @@ async def run_cmd(*args: str, cwd: Path | None = None, timeout: int = 300) -> tu
     return proc.returncode, stdout.decode(errors="replace").strip()
 
 
-async def compose(stack: Path, *args: str, timeout: int = 300) -> tuple[int, str]:
-    return await run_cmd("docker", "compose", *args, cwd=stack, timeout=timeout)
-
-
-def resolve_stack(name: str) -> Path | None:
-    return discover_stacks().get(name.lower())
-
-
 def clip(text: str, limit: int = 1900) -> str:
     """Tronque un texte pour tenir dans un message Discord."""
     return text if len(text) <= limit else "…" + text[-limit:]
+
+
+### 🎮 Serveurs de jeux ###
+def discover_games() -> dict[str, Path]:
+    """Détecte les serveurs de jeux : sous-dossiers de GAME_SERVERS_DIR avec un start.sh."""
+    games = {}
+    if GAME_SERVERS_DIR.is_dir():
+        for d in sorted(GAME_SERVERS_DIR.iterdir()):
+            if d.is_dir() and (d / GAME_START_SCRIPT).is_file():
+                games[d.name.lower()] = d
+    return games
+
+
+def game_unit(name: str) -> str:
+    return f"game-{name}"
+
+
+async def game_running(name: str) -> bool:
+    code, _ = await run_cmd("systemctl", "--user", "is-active", "--quiet", game_unit(name), timeout=10)
+    return code == 0
+
+
+async def launch_game(game: Path) -> tuple[int, str]:
+    name = game.name.lower()
+    await run_cmd("systemctl", "--user", "reset-failed", game_unit(name), timeout=10)
+    return await run_cmd(
+        "systemd-run", "--user", "--collect",
+        f"--unit={game_unit(name)}",
+        f"--working-directory={game}",
+        str(game / GAME_START_SCRIPT),
+        timeout=30,
+    )
 
 
 ### 🌡️ Température CPU (k10temp, sans lm-sensors) ###
@@ -114,136 +125,30 @@ def get_disk_usage() -> list[tuple[str, float, float, float]]:
     return usage
 
 
-### 🎮 Serveurs de jeux (sur le Bureau, hors disque externe) ###
-def discover_games() -> dict[str, Path]:
-    """Détecte les serveurs de jeux : sous-dossiers de GAME_SERVERS_DIR avec un start.sh."""
-    games = {}
-    if GAME_SERVERS_DIR.is_dir():
-        for d in sorted(GAME_SERVERS_DIR.iterdir()):
-            if d.is_dir() and (d / GAME_START_SCRIPT).is_file():
-                games[d.name.lower()] = d
-    return games
-
-
-def game_unit(name: str) -> str:
-    return f"game-{name}"
-
-
-async def game_running(name: str) -> bool:
-    code, _ = await run_cmd("systemctl", "--user", "is-active", "--quiet", game_unit(name), timeout=10)
-    return code == 0
-
-
 ### 🔒 Contrôle d'accès ###
 def authorized():
     async def predicate(ctx: commands.Context) -> bool:
         if not ALLOWED_USER_IDS or ctx.author.id in ALLOWED_USER_IDS:
             return True
-        await ctx.send("⛔ **Vous n'êtes pas autorisé à piloter le serveur.**")
+        await ctx.send("⛔ **Vous n'êtes pas autorisé à piloter les serveurs.**")
         return False
 
     return commands.check(predicate)
 
 
-async def require_stack(ctx: commands.Context, name: str) -> Path | None:
-    stack = resolve_stack(name)
-    if stack is None:
-        stacks = ", ".join(f"`{s}`" for s in discover_stacks()) or "aucune"
-        await ctx.send(f"⚠️ **Pile `{name}` introuvable.** Piles disponibles : {stacks}")
-    return stack
+async def require_game(ctx: commands.Context, name: str) -> Path | None:
+    games = discover_games()
+    game = games.get(name.lower())
+    if game is None:
+        available = ", ".join(f"`{g}`" for g in games) or "aucun"
+        await ctx.send(f"⚠️ **Serveur `{name}` introuvable.** Disponibles : {available}")
+    return game
 
 
 ### 🕹️ Commandes Discord ###
-@bot.command(name="stacks")
-async def stacks_cmd(ctx: commands.Context):
-    """Liste les piles Docker Compose disponibles"""
-    stacks = discover_stacks()
-    if not stacks:
-        await ctx.send(f"❌ **Aucune pile trouvée dans `{STACKS_DIR}`.**")
-        return
-    await ctx.send("🐳 **Piles disponibles :** " + ", ".join(f"`{s}`" for s in stacks))
-
-
-@bot.command()
-@authorized()
-async def start(ctx: commands.Context, name: str):
-    """Démarre une pile : !start jellyfin"""
-    stack = await require_stack(ctx, name)
-    if stack is None:
-        return
-    await ctx.send(f"🟢 **Démarrage de `{stack.name}`…**")
-    code, output = await compose(stack, "up", "-d")
-    if code == 0:
-        await ctx.send(f"✅ **Pile `{stack.name}` démarrée !**")
-    else:
-        await ctx.send(f"❌ **Échec du démarrage de `{stack.name}` :**\n```{clip(output)}```")
-
-
-@bot.command()
-@authorized()
-async def stop(ctx: commands.Context, name: str):
-    """Arrête une pile : !stop jellyfin"""
-    stack = await require_stack(ctx, name)
-    if stack is None:
-        return
-    await ctx.send(f"🛑 **Arrêt de `{stack.name}`…**")
-    code, output = await compose(stack, "down")
-    if code == 0:
-        await ctx.send(f"✅ **Pile `{stack.name}` arrêtée !**")
-    else:
-        await ctx.send(f"❌ **Échec de l'arrêt de `{stack.name}` :**\n```{clip(output)}```")
-
-
-@bot.command()
-@authorized()
-async def restart(ctx: commands.Context, name: str):
-    """Redémarre une pile : !restart nextcloud"""
-    stack = await require_stack(ctx, name)
-    if stack is None:
-        return
-    await ctx.send(f"🔄 **Redémarrage de `{stack.name}`…**")
-    code, output = await compose(stack, "restart")
-    if code == 0:
-        await ctx.send(f"✅ **Pile `{stack.name}` redémarrée !**")
-    else:
-        await ctx.send(f"❌ **Échec du redémarrage de `{stack.name}` :**\n```{clip(output)}```")
-
-
-@bot.command()
-@authorized()
-async def update(ctx: commands.Context, name: str):
-    """Met à jour les images d'une pile : !update nextcloud"""
-    stack = await require_stack(ctx, name)
-    if stack is None:
-        return
-    await ctx.send(f"🔄 **Mise à jour des images de `{stack.name}`…**")
-    code, output = await compose(stack, "pull", timeout=900)
-    if code != 0:
-        await ctx.send(f"❌ **Échec du téléchargement des images :**\n```{clip(output)}```")
-        return
-    code, output = await compose(stack, "up", "-d")
-    if code == 0:
-        await ctx.send(f"✅ **Pile `{stack.name}` à jour et relancée !**")
-    else:
-        await ctx.send(f"❌ **Échec du relancement :**\n```{clip(output)}```")
-
-
-@bot.command()
-async def logs(ctx: commands.Context, name: str, lines: int = 20):
-    """Affiche les derniers logs d'une pile : !logs caddy 30"""
-    stack = await require_stack(ctx, name)
-    if stack is None:
-        return
-    code, output = await compose(stack, "logs", "--tail", str(min(lines, 100)), "--no-color")
-    if code != 0 or not output:
-        await ctx.send(f"⚠️ **Impossible de lire les logs de `{stack.name}`.**")
-        return
-    await ctx.send(f"📄 **Logs de `{stack.name}` :**\n```{clip(output)}```")
-
-
 @bot.command(name="games")
 async def games_cmd(ctx: commands.Context):
-    """Liste les serveurs de jeux disponibles"""
+    """Liste les serveurs de jeux et leur état"""
     games = discover_games()
     if not games:
         await ctx.send(
@@ -260,26 +165,16 @@ async def games_cmd(ctx: commands.Context):
 
 @bot.command()
 @authorized()
-async def gstart(ctx: commands.Context, name: str):
-    """Démarre un serveur de jeu : !gstart palworld"""
-    games = discover_games()
-    game = games.get(name.lower())
+async def start(ctx: commands.Context, name: str):
+    """Démarre un serveur de jeu : !start palworld"""
+    game = await require_game(ctx, name)
     if game is None:
-        available = ", ".join(f"`{g}`" for g in games) or "aucun"
-        await ctx.send(f"⚠️ **Jeu `{name}` introuvable.** Disponibles : {available}")
         return
     if await game_running(game.name.lower()):
         await ctx.send(f"⚠️ **Le serveur `{game.name}` tourne déjà !**")
         return
     await ctx.send(f"🟢 **Démarrage de `{game.name}`…**")
-    await run_cmd("systemctl", "--user", "reset-failed", game_unit(game.name.lower()), timeout=10)
-    code, output = await run_cmd(
-        "systemd-run", "--user", "--collect",
-        f"--unit={game_unit(game.name.lower())}",
-        f"--working-directory={game}",
-        str(game / GAME_START_SCRIPT),
-        timeout=30,
-    )
+    code, output = await launch_game(game)
     if code == 0:
         await ctx.send(f"✅ **Serveur `{game.name}` lancé !**")
     else:
@@ -288,13 +183,17 @@ async def gstart(ctx: commands.Context, name: str):
 
 @bot.command()
 @authorized()
-async def gstop(ctx: commands.Context, name: str):
-    """Arrête un serveur de jeu : !gstop palworld"""
-    if not await game_running(name.lower()):
+async def stop(ctx: commands.Context, name: str):
+    """Arrête un serveur de jeu : !stop palworld"""
+    game = await require_game(ctx, name)
+    if game is None:
+        return
+    name = game.name.lower()
+    if not await game_running(name):
         await ctx.send(f"⚠️ **Le serveur `{name}` n'est pas en cours d'exécution !**")
         return
     await ctx.send(f"🛑 **Arrêt de `{name}`…**")
-    code, output = await run_cmd("systemctl", "--user", "stop", game_unit(name.lower()), timeout=60)
+    code, output = await run_cmd("systemctl", "--user", "stop", game_unit(name), timeout=90)
     if code == 0:
         await ctx.send(f"✅ **Serveur `{name}` arrêté !**")
     else:
@@ -302,33 +201,59 @@ async def gstop(ctx: commands.Context, name: str):
 
 
 @bot.command()
-async def status(ctx: commands.Context):
-    """État des services, température et disques"""
-    embed = discord.Embed(title="💻 McCloud — État du serveur", color=0x3FB950)
-
-    stacks = discover_stacks()
-    if stacks:
-        report = []
-        for name, path in stacks.items():
-            code, output = await compose(path, "ps", "--format", "{{.Name}}: {{.State}}", timeout=30)
-            if code != 0:
-                report.append(f"❓ `{name}` : état inconnu")
-            elif not output:
-                report.append(f"🔴 `{name}` : arrêtée")
-            else:
-                icon = "🟢" if all("running" in l for l in output.splitlines()) else "🟡"
-                report.append(f"{icon} `{name}` : {output.count(chr(10)) + 1} conteneur(s)")
-        embed.add_field(name="🐳 Services", value="\n".join(report), inline=False)
+@authorized()
+async def restart(ctx: commands.Context, name: str):
+    """Redémarre un serveur de jeu : !restart palworld"""
+    game = await require_game(ctx, name)
+    if game is None:
+        return
+    if await game_running(game.name.lower()):
+        await ctx.send(f"🛑 **Arrêt de `{game.name}`…**")
+        await run_cmd("systemctl", "--user", "stop", game_unit(game.name.lower()), timeout=90)
+    await ctx.send(f"🟢 **Démarrage de `{game.name}`…**")
+    code, output = await launch_game(game)
+    if code == 0:
+        await ctx.send(f"✅ **Serveur `{game.name}` relancé !**")
     else:
-        embed.add_field(name="🐳 Services", value="Aucune pile trouvée", inline=False)
+        await ctx.send(f"❌ **Échec du lancement :**\n```{clip(output)}```")
+
+
+@bot.command()
+async def logs(ctx: commands.Context, name: str, lines: int = 20):
+    """Affiche les derniers logs d'un serveur : !logs palworld 30"""
+    game = await require_game(ctx, name)
+    if game is None:
+        return
+    code, output = await run_cmd(
+        "journalctl", "--user", "-u", game_unit(game.name.lower()),
+        "-n", str(min(lines, 100)), "--no-pager", "-o", "cat",
+        timeout=30,
+    )
+    if code != 0 or not output:
+        await ctx.send(f"⚠️ **Aucun log disponible pour `{game.name}`.**")
+        return
+    await ctx.send(f"📄 **Logs de `{game.name}` :**\n```{clip(output)}```")
+
+
+@bot.command()
+async def status(ctx: commands.Context):
+    """État des serveurs de jeux, température et disques"""
+    embed = discord.Embed(title="💻 McCloud — État du serveur", color=0x3FB950)
 
     games = discover_games()
     if games:
         report = []
         for name in games:
             icon = "🟢" if await game_running(name) else "🔴"
-            report.append(f"{icon} `{name}`")
+            state = "en ligne" if icon == "🟢" else "arrêté"
+            report.append(f"{icon} `{name}` : {state}")
         embed.add_field(name="🎮 Serveurs de jeux", value="\n".join(report), inline=False)
+    else:
+        embed.add_field(
+            name="🎮 Serveurs de jeux",
+            value=f"Aucun jeu installé dans `{GAME_SERVERS_DIR}`",
+            inline=False,
+        )
 
     temp = get_cpu_temp()
     if temp is not None:
