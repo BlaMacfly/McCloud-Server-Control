@@ -18,6 +18,9 @@ sans modifier le code.
 - 🎮 Lancement, arrêt et redémarrage des serveurs de jeux via Discord
 - 🔍 Détection automatique des jeux installés (un dossier + un `start.sh`)
 - 🧰 Exécution en unités systemd utilisateur — pas besoin de `tmux` ni de root
+- 🔓 Ouverture automatique des ports sur la box via UPnP au lancement d'un
+  serveur, fermeture automatique à l'arrêt (même en cas de crash) — déclarez
+  les ports dans un fichier `ports.conf` à côté du `start.sh`
 - 📄 Consultation des logs de chaque serveur depuis Discord
 - 📊 État global (serveurs, température, disques) avec `!status`
 - 🌡️ Alerte automatique en cas de température CPU critique, via webhook Discord
@@ -50,7 +53,8 @@ Chaque serveur de jeu s'installe dans son propre sous-dossier de
 ```
 GameServers/
 ├── palworld/
-│   └── start.sh
+│   ├── start.sh
+│   └── ports.conf     # 8211/udp — ouvert via UPnP pendant que le serveur tourne
 └── minecraft/
     └── start.sh
 ```
@@ -64,6 +68,10 @@ exec ./bedrock_server
 ```
 
 Le bot le détecte automatiquement — `!games` le liste, `!start minecraft` le lance.
+
+Pour l'ouverture automatique des ports, installez `miniupnpc` (`sudo apt install
+miniupnpc`) et activez l'UPnP sur votre box. Sans `upnpc` ou sans `ports.conf`,
+le serveur se lance normalement, simplement sans redirection automatique.
 
 ## 📁 Installation du bot
 

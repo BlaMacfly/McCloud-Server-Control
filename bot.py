@@ -9,6 +9,7 @@ Conçu pour Debian 13.
 import asyncio
 import os
 import shutil
+import socket
 from pathlib import Path
 
 import aiohttp
@@ -26,6 +27,8 @@ TEMP_CRITICAL_THRESHOLD = float(os.getenv("TEMP_CRITICAL_THRESHOLD") or 80)
 TEMP_CHECK_MINUTES = int(os.getenv("TEMP_CHECK_MINUTES") or 10)
 GAME_SERVERS_DIR = Path(os.getenv("GAME_SERVERS_DIR") or str(Path.home() / "Bureau/GameServers"))
 GAME_START_SCRIPT = "start.sh"
+GAME_PORTS_FILE = "ports.conf"
+UPNPC = shutil.which("upnpc")
 DISKS = [p for p in (os.getenv("DISKS") or "/,/mnt/multimedia").split(",") if p]
 
 # 🔒 IDs Discord autorisés à piloter les serveurs (vide = tout le monde)
@@ -81,15 +84,48 @@ async def game_running(name: str) -> bool:
     return code == 0
 
 
+def game_ports(game: Path) -> list[tuple[int, str]]:
+    """Lit les ports du jeu depuis ports.conf (format : 8211/udp, un par ligne)."""
+    ports_file = game / GAME_PORTS_FILE
+    ports = []
+    if ports_file.is_file():
+        for entry in ports_file.read_text().split():
+            port, _, proto = entry.partition("/")
+            if port.isdigit() and proto.upper() in ("TCP", "UDP"):
+                ports.append((int(port), proto.upper()))
+    return ports
+
+
+def get_lan_ip() -> str:
+    """Adresse IP locale de la machine sur le réseau domestique."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("192.168.1.1", 80))
+        return s.getsockname()[0]
+
+
 async def launch_game(game: Path) -> tuple[int, str]:
     name = game.name.lower()
     await run_cmd("systemctl", "--user", "reset-failed", game_unit(name), timeout=10)
+
+    # Ouverture UPnP des ports au démarrage, fermeture à l'arrêt de l'unité
+    # (ExecStopPost s'exécute aussi si le serveur plante). Le préfixe « - »
+    # évite de bloquer le jeu si la box refuse l'UPnP.
+    upnp_props = []
+    if UPNPC:
+        lan_ip = get_lan_ip()
+        for port, proto in game_ports(game):
+            upnp_props += [
+                "-p", f"ExecStartPre=-{UPNPC} -e {game_unit(name)} -a {lan_ip} {port} {port} {proto}",
+                "-p", f"ExecStopPost=-{UPNPC} -d {port} {proto}",
+            ]
+
     return await run_cmd(
         "systemd-run", "--user", "--collect",
         f"--unit={game_unit(name)}",
         f"--working-directory={game}",
+        *upnp_props,
         str(game / GAME_START_SCRIPT),
-        timeout=30,
+        timeout=60,
     )
 
 
@@ -176,7 +212,9 @@ async def start(ctx: commands.Context, name: str):
     await ctx.send(f"🟢 **Démarrage de `{game.name}`…**")
     code, output = await launch_game(game)
     if code == 0:
-        await ctx.send(f"✅ **Serveur `{game.name}` lancé !**")
+        ports = ", ".join(f"{p}/{proto}" for p, proto in game_ports(game))
+        note = f" 🔓 Ports ouverts sur la box : {ports}" if ports and UPNPC else ""
+        await ctx.send(f"✅ **Serveur `{game.name}` lancé !**{note}")
     else:
         await ctx.send(f"❌ **Échec du lancement :**\n```{clip(output)}```")
 
