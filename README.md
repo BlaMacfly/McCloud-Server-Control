@@ -2,60 +2,55 @@
 
 ![McCloud Server Contrôle](./McCloud%20Server%20Contr%C3%B4le.png)
 
-## 📜 Licence
+🐳 **McCloud Server Control** est un bot Discord développé par BlaMacfly en Python
+permettant de piloter le serveur domestique **McCloud** (Debian 13) : il gère les
+piles **Docker Compose** de `/opt/stacks` (Caddy, NextCloud, Jellyfin…), surveille
+la **température CPU** et l'**espace disque**.
 
-Ce projet est sous la **MIT License**. Voir le fichier [LICENSE](./LICENSE) pour plus de détails.
-
-
-🎮 **McCloud Server Control** est un bot Discord développé par BlaMacfly en Python permettant de gérer plusieurs serveurs de jeux Linux **conçus spécifiquement pour un système Ubuntu OS**.  
-Il permet de **lancer, arrêter, surveiller et mettre à jour** les serveurs suivants :
-
-- Palworld
-- Valheim
-- ARK: Survival Evolved
-- Minecraft Bedrock Edition
+Les piles sont détectées automatiquement : toute nouvelle pile ajoutée dans
+`/opt/stacks` (par exemple via Dockge) est immédiatement pilotable, sans modifier
+le code.
 
 ---
 
 ## ⚙️ Fonctionnalités principales
 
-- 🟢 Lancement et arrêt des serveurs via Discord (`!pstart`, `!pstop`, etc.)
-- 🔄 Mise à jour automatique des serveurs via SteamCMD (sauf Minecraft)
-- 💬 Statut du serveur en temps réel avec `!status`
-- 🌡️ Suivi automatique de la température CPU (via `lm-sensors`)
-- ✅ Utilisation de `tmux` pour exécution en arrière-plan
-- 📦 Configuration sécurisée via `.env`
-- 🐧 **Optimisé pour un environnement Ubuntu OS**
+- 🐳 Démarrage, arrêt, redémarrage et mise à jour des piles Docker via Discord
+- 🔍 Détection automatique des piles présentes dans `/opt/stacks`
+- 📊 État global du serveur (services, température, disques) avec `!status`
+- 📄 Consultation des logs des conteneurs depuis Discord
+- 🌡️ Alerte automatique en cas de température CPU critique (lecture directe
+  de `/sys/class/hwmon`, sans `lm-sensors`)
+- 💾 Suivi de l'espace disque (`/` et `/mnt/multimedia`)
+- 🔒 Liste blanche optionnelle d'utilisateurs Discord autorisés
+- 📦 Configuration via `.env`, aucun secret dans le code
 
-## 🛑 Commandes disponibles dans Discord
+## 🕹️ Commandes disponibles dans Discord
 
-| Commande   | Action                                  |
-|------------|------------------------------------------|
-| `!pstart`  | Démarre le serveur **Palworld**          |
-| `!pstop`   | Arrête le serveur **Palworld**           |
-| `!vstart`  | Démarre le serveur **Valheim**           |
-| `!vstop`   | Arrête le serveur **Valheim**            |
-| `!astart`  | Démarre le serveur **ARK**               |
-| `!astop`   | Arrête le serveur **ARK**                |
-| `!mstart`  | Démarre le serveur **Minecraft Bedrock** |
-| `!mstop`   | Arrête le serveur **Minecraft Bedrock**  |
-| `!status`  | Affiche le serveur actuellement actif    |
-
+| Commande              | Action                                                |
+|-----------------------|-------------------------------------------------------|
+| `!stacks`             | Liste les piles Docker disponibles                    |
+| `!start <pile>`       | Démarre une pile (`!start jellyfin`)                  |
+| `!stop <pile>`        | Arrête une pile (`!stop jellyfin`)                    |
+| `!restart <pile>`     | Redémarre une pile (`!restart nextcloud`)             |
+| `!update <pile>`      | Met à jour les images et relance la pile              |
+| `!logs <pile> [n]`    | Affiche les `n` dernières lignes de logs (20 défaut)  |
+| `!status`             | État des services, température CPU et disques         |
+| `!temp`               | Température CPU actuelle                              |
+| `!disk`               | Espace disque des volumes surveillés                  |
 
 ---
----
 
-## 📦 Dépendances
+## 📦 Prérequis
 
-Dépendances système (Ubuntu requis)
-
-sudo apt install tmux lm-sensors
-
-
-### 📚 Python (installées avec pip)
+- Debian 12/13 avec Docker et le plugin Docker Compose
+- L'utilisateur exécutant le bot doit appartenir au groupe `docker` :
 
 ```bash
-pip install discord.py python-dotenv
+sudo usermod -aG docker $USER
+```
+
+(déconnexion/reconnexion nécessaire pour que le groupe soit pris en compte)
 
 ## 📁 Installation
 
@@ -65,11 +60,26 @@ cd McCloud-Server-Control
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env   # puis renseignez DISCORD_TOKEN et les salons
+```
 
-### 🚀 Utilisation
+## 🚀 Utilisation
 
-## Activez votre environnement virtuel et lancez le bot :
-
+```bash
 source venv/bin/activate
 python bot.py
+```
 
+### 🔁 Lancement automatique au démarrage (systemd)
+
+```bash
+sudo cp mccloud-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mccloud-bot
+```
+
+---
+
+## 📜 Licence
+
+Ce projet est sous la **MIT License**. Voir le fichier [LICENSE](./LICENSE) pour plus de détails.

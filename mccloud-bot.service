@@ -1,0 +1,15 @@
+[Unit]
+Description=McCloud Server Control — bot Discord
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=blamacfly
+WorkingDirectory=/home/blamacfly/Bureau/McCloud-Server-Control
+ExecStart=/home/blamacfly/Bureau/McCloud-Server-Control/venv/bin/python bot.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

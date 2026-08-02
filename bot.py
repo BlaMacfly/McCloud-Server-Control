@@ -1,275 +1,309 @@
+"""McCloud Server Control — bot Discord de pilotage du serveur McCloud.
+
+Gère les piles Docker Compose de /opt/stacks (Caddy, NextCloud, Jellyfin…),
+surveille la température CPU (k10temp via /sys/class/hwmon, sans lm-sensors)
+et l'espace disque. Conçu pour Debian 13.
+"""
+
+import asyncio
+import os
+import shutil
+from pathlib import Path
+
 import discord
 from discord.ext import commands, tasks
-import subprocess
-import os
-import asyncio
+from dotenv import load_dotenv
 
-# Token du bot
-TOKEN = "Token ici"
+load_dotenv()
 
-# 📢 ID des salons Discord
-TEMP_LOG_CHANNEL_ID = ID ici  
-SERVER_STATUS_CHANNEL_ID = ID ici 
+# ⚙️ Configuration (voir .env.example)
+TOKEN = os.getenv("DISCORD_TOKEN")
+TEMP_LOG_CHANNEL_ID = int(os.getenv("TEMP_LOG_CHANNEL_ID", "0"))
+TEMP_CRITICAL_THRESHOLD = float(os.getenv("TEMP_CRITICAL_THRESHOLD", "80"))
+TEMP_CHECK_MINUTES = int(os.getenv("TEMP_CHECK_MINUTES", "10"))
+STACKS_DIR = Path(os.getenv("STACKS_DIR", "/opt/stacks"))
+DISKS = [p for p in os.getenv("DISKS", "/,/mnt/multimedia").split(",") if p]
 
-# 🌡️ Seuil critique de température CPU
-TEMP_CRITICAL_THRESHOLD = 80  
-
-# 📂 Chemins des serveurs
-SERVERS = {
-    "palworld": {
-        "path": "/home/UbuntuPC/Palworld/PalServer",
-        "script": "PalServer.sh",
-        "app_id": 2394010
-    },
-    "valheim": {
-        "path": "/home/UbuntuPC/valheim/server",
-        "script": "start_server.sh",
-        "app_id": 896660
-    },
-    "ark": {
-        "path": "/home/UbuntuPC/ark/server",
-        "script": "start_ark.sh",
-        "app_id": 376030
-    },
-    "minecraft": {
-        "path": "/home/UbuntuPC/Minecraft/bedrock-server",
-        "script": "bedrock_server",  # pas de .sh ici
-        "app_id": None  # pas utilisé pour Minecraft Bedrock
-    }
+# 🔒 IDs Discord autorisés à piloter les services (vide = tout le monde)
+ALLOWED_USER_IDS = {
+    int(i) for i in os.getenv("ALLOWED_USER_IDS", "").split(",") if i.strip()
 }
 
+COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
 
-STEAMCMD_PATH = "/home/UbuntuPC/steamcmd/steamcmd.sh"
-
-# 🎮 Configuration du bot Discord
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-### 📌 Vérifications des serveurs ###
-def check_status(session_name):
-    """ Vérifie si un serveur tourne via tmux """
-    try:
-        result = subprocess.run(["tmux", "has-session", "-t", session_name], capture_output=True, text=True)
-        return result.returncode == 0
-    except:
-        return False
 
-def get_running_server():
-    """ Vérifie si un serveur est déjà actif et retourne son nom """
-    for server in SERVERS.keys():
-        if check_status(server):
-            return server
-    return None
+### 🐳 Piles Docker Compose ###
+def discover_stacks() -> dict[str, Path]:
+    """Détecte les piles Docker Compose présentes dans STACKS_DIR."""
+    stacks = {}
+    if STACKS_DIR.is_dir():
+        for d in sorted(STACKS_DIR.iterdir()):
+            if d.is_dir() and any((d / f).is_file() for f in COMPOSE_FILES):
+                stacks[d.name] = d
+    return stacks
 
-### 🔄 Mise à jour du serveur via SteamCMD ###
-def update_server(app_id):
-    try:
-        print(f"🔄 Mise à jour de l'AppID {app_id} en cours...")
-        result = subprocess.run(
-            [STEAMCMD_PATH, "+login", "anonymous", "+force_install_dir", SERVERS["palworld"]["path"], f"+app_update {app_id} validate", "+quit"],
-            capture_output=True, text=True, check=True
-        )
-        print(f"📝 Résultat de la mise à jour :\n{result.stdout}")
-        return "success" in result.stdout.lower() or "fully installed" in result.stdout.lower() or "already up to date" in result.stdout.lower()
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Erreur SteamCMD : {e}")
-        return False
 
-### 🚀 Démarrer un serveur ###
-async def start_server(ctx, session_name):
-    running_server = get_running_server()
-    if running_server:
-        await ctx.send(f"⚠️ **Le serveur {running_server} est déjà en cours d'exécution. Arrêtez-le avant de lancer {session_name}.**")
-        return
-
-    await ctx.send(f"🛑 **Arrêt du serveur {session_name} avant la mise à jour...**")
-    subprocess.run(["tmux", "kill-session", "-t", session_name], capture_output=True, text=True)
-
-    await ctx.send(f"🔄 **Vérification des mises à jour pour {session_name}...**")
-    updated = await update_server(SERVERS[session_name]["app_id"])
-    if updated:
-        await ctx.send(f"✅ **Mise à jour de {session_name} appliquée avec succès !**")
-
-    await ctx.send(f"🟢 **Démarrage du serveur {session_name}...**")
-    subprocess.run(
-        ["tmux", "new-session", "-d", "-s", session_name, f"bash -c 'cd {SERVERS[session_name]['path']} && ./{SERVERS[session_name]['script']}; bash'"],
-        capture_output=True, text=True
+async def run_cmd(*args: str, cwd: Path | None = None, timeout: int = 300) -> tuple[int, str]:
+    """Exécute une commande sans bloquer la boucle d'événements."""
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
-    await ctx.send(f"✅ **Serveur {session_name} lancé !**")
-
-    # ✅ Attendre plus longtemps pour que le serveur démarre et génère les logs
-    await asyncio.sleep(20)
-
-    # ✅ Récupérer la version après le démarrage
-    version = get_server_version(session_name)
-    await ctx.send(f"📝 **Version du serveur {session_name} : {version}**")
-
-
-### 🔄 Mise à jour du serveur via SteamCMD ###
-async def update_server(app_id):
     try:
-        await asyncio.sleep(1)  # Petit délai pour éviter les conflits avec SteamCMD
-        print(f"🔄 Mise à jour de l'AppID {app_id} en cours...")
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return 1, f"⏱️ Commande interrompue après {timeout}s : {' '.join(args)}"
+    return proc.returncode, stdout.decode(errors="replace").strip()
 
-        process = await asyncio.create_subprocess_exec(
-            STEAMCMD_PATH, "+force_install_dir", SERVERS["palworld"]["path"], "+login", "anonymous",
-            f"+app_update {app_id} validate", "+quit",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
 
-        stdout, stderr = await process.communicate()
-        output = stdout.decode() + stderr.decode()
-        print(f"📝 Résultat de la mise à jour :\n{output}")
+async def compose(stack: Path, *args: str, timeout: int = 300) -> tuple[int, str]:
+    return await run_cmd("docker", "compose", *args, cwd=stack, timeout=timeout)
 
-        return "success" in output.lower() or "fully installed" in output.lower() or "already up to date" in output.lower()
-    except Exception as e:
-        print(f"❌ Erreur SteamCMD : {e}")
+
+def resolve_stack(name: str) -> Path | None:
+    return discover_stacks().get(name.lower())
+
+
+def clip(text: str, limit: int = 1900) -> str:
+    """Tronque un texte pour tenir dans un message Discord."""
+    return text if len(text) <= limit else "…" + text[-limit:]
+
+
+### 🌡️ Température CPU (k10temp, sans lm-sensors) ###
+def get_cpu_temp() -> float | None:
+    """Lit la température CPU dans /sys/class/hwmon (k10temp en priorité)."""
+    fallback = None
+    for hwmon in sorted(Path("/sys/class/hwmon").glob("hwmon*")):
+        sensor = hwmon / "temp1_input"
+        if not sensor.is_file():
+            continue
+        try:
+            value = int(sensor.read_text()) / 1000
+        except (OSError, ValueError):
+            continue
+        if (hwmon / "name").read_text().strip() == "k10temp":
+            return value
+        if fallback is None:
+            fallback = value
+    return fallback
+
+
+### 💾 Espace disque ###
+def get_disk_usage() -> list[tuple[str, float, float, float]]:
+    """Retourne (point de montage, total Go, utilisé Go, % utilisé) par disque."""
+    usage = []
+    for mount in DISKS:
+        try:
+            total, used, _ = shutil.disk_usage(mount)
+        except OSError:
+            continue
+        usage.append((mount, total / 1e9, used / 1e9, used / total * 100))
+    return usage
+
+
+### 🔒 Contrôle d'accès ###
+def authorized():
+    async def predicate(ctx: commands.Context) -> bool:
+        if not ALLOWED_USER_IDS or ctx.author.id in ALLOWED_USER_IDS:
+            return True
+        await ctx.send("⛔ **Vous n'êtes pas autorisé à piloter le serveur.**")
         return False
 
-
-### 📄 Récupérer la version du serveur ###
-def get_server_version(session_name):
-    """ Récupère la version du serveur via les logs """
-    log_file = f"{SERVERS[session_name]['path']}/PalServer.log"  # Ajuste en fonction de ton serveur
-
-    try:
-        with open(log_file, "r") as f:
-            lines = f.readlines()
-            for line in lines:
-                if "version" in line.lower():  # Modifie si nécessaire pour détecter la bonne ligne
-                    return line.strip()
-        return "Version inconnue"
-    except FileNotFoundError:
-        return "Log introuvable"
+    return commands.check(predicate)
 
 
+async def require_stack(ctx: commands.Context, name: str) -> Path | None:
+    stack = resolve_stack(name)
+    if stack is None:
+        stacks = ", ".join(f"`{s}`" for s in discover_stacks()) or "aucune"
+        await ctx.send(f"⚠️ **Pile `{name}` introuvable.** Piles disponibles : {stacks}")
+    return stack
 
-### 🛑 Arrêter un serveur ###
-async def stop_server(ctx, session_name):
-    if not check_status(session_name):
-        await ctx.send(f"⚠️ **Le serveur {session_name} n'est pas en cours d'exécution !**")
-        return
-    
-    await ctx.send(f"🛑 **Arrêt du serveur {session_name}...**")
-    subprocess.run(["tmux", "kill-session", "-t", session_name], capture_output=True, text=True)
-    await ctx.send(f"✅ **Serveur {session_name} arrêté !**")
-
-### 🌡️ Surveillance de la température CPU ###
-def get_cpu_temp():
-    try:
-        result = subprocess.run(["sensors"], capture_output=True, text=True, check=True)
-        for line in result.stdout.split("\n"):
-            if "Tctl" in line or "edge" in line:
-                temp = [s for s in line.split() if s.replace('+', '').replace('°C', '').replace('.', '').isdigit()]
-                if temp:
-                    return float(temp[0].replace("°C", ""))
-        return None
-    except Exception:
-        return None
-
-@tasks.loop(minutes=10)
-async def send_cpu_temp():
-    channel = bot.get_channel(TEMP_LOG_CHANNEL_ID)
-    if channel:
-        temperature = get_cpu_temp()
-        if temperature is not None:
-            await channel.send(f"🌡️ Température actuelle du serveur : {temperature}°C")
-            if temperature >= TEMP_CRITICAL_THRESHOLD:
-                await channel.send(f"🚨 **ALERTE : Température critique détectée ! ({temperature}°C)** 🚨")
-        else:
-            await channel.send("⚠️ Impossible de récupérer la température du serveur.")
 
 ### 🕹️ Commandes Discord ###
-@bot.command()
-async def pstart(ctx):
-    """ Commande pour démarrer Palworld """
-    await start_server(ctx, "palworld")
+@bot.command(name="stacks")
+async def stacks_cmd(ctx: commands.Context):
+    """Liste les piles Docker Compose disponibles"""
+    stacks = discover_stacks()
+    if not stacks:
+        await ctx.send(f"❌ **Aucune pile trouvée dans `{STACKS_DIR}`.**")
+        return
+    await ctx.send("🐳 **Piles disponibles :** " + ", ".join(f"`{s}`" for s in stacks))
+
 
 @bot.command()
-async def vstart(ctx):
-    """ Commande pour démarrer Valheim """
-    await start_server(ctx, "valheim")
+@authorized()
+async def start(ctx: commands.Context, name: str):
+    """Démarre une pile : !start jellyfin"""
+    stack = await require_stack(ctx, name)
+    if stack is None:
+        return
+    await ctx.send(f"🟢 **Démarrage de `{stack.name}`…**")
+    code, output = await compose(stack, "up", "-d")
+    if code == 0:
+        await ctx.send(f"✅ **Pile `{stack.name}` démarrée !**")
+    else:
+        await ctx.send(f"❌ **Échec du démarrage de `{stack.name}` :**\n```{clip(output)}```")
+
 
 @bot.command()
-async def astart(ctx):
-    """ Commande pour démarrer ARK """
-    await start_server(ctx, "ark")
-    
+@authorized()
+async def stop(ctx: commands.Context, name: str):
+    """Arrête une pile : !stop jellyfin"""
+    stack = await require_stack(ctx, name)
+    if stack is None:
+        return
+    await ctx.send(f"🛑 **Arrêt de `{stack.name}`…**")
+    code, output = await compose(stack, "down")
+    if code == 0:
+        await ctx.send(f"✅ **Pile `{stack.name}` arrêtée !**")
+    else:
+        await ctx.send(f"❌ **Échec de l'arrêt de `{stack.name}` :**\n```{clip(output)}```")
+
+
 @bot.command()
-async def mstart(ctx):
-    try:
-        session_name = "minecraft"
-        path = SERVERS[session_name]["path"]
+@authorized()
+async def restart(ctx: commands.Context, name: str):
+    """Redémarre une pile : !restart nextcloud"""
+    stack = await require_stack(ctx, name)
+    if stack is None:
+        return
+    await ctx.send(f"🔄 **Redémarrage de `{stack.name}`…**")
+    code, output = await compose(stack, "restart")
+    if code == 0:
+        await ctx.send(f"✅ **Pile `{stack.name}` redémarrée !**")
+    else:
+        await ctx.send(f"❌ **Échec du redémarrage de `{stack.name}` :**\n```{clip(output)}```")
 
-        # Vérifie si un autre serveur est actif
-        running_server = get_running_server()
-        if running_server and running_server != session_name:
-            await ctx.send(f"⚠️ **Le serveur {running_server} est déjà en cours d'exécution. Arrêtez-le avec `!{running_server[0]}stop` avant de lancer Minecraft.**")
-            return
 
-        # Vérifie si Minecraft est déjà lancé
-        if check_status(session_name):
-            await ctx.send("⚠️ **Le serveur Minecraft est déjà en cours d'exécution !**")
-            return
+@bot.command()
+@authorized()
+async def update(ctx: commands.Context, name: str):
+    """Met à jour les images d'une pile : !update nextcloud"""
+    stack = await require_stack(ctx, name)
+    if stack is None:
+        return
+    await ctx.send(f"🔄 **Mise à jour des images de `{stack.name}`…**")
+    code, output = await compose(stack, "pull", timeout=900)
+    if code != 0:
+        await ctx.send(f"❌ **Échec du téléchargement des images :**\n```{clip(output)}```")
+        return
+    code, output = await compose(stack, "up", "-d")
+    if code == 0:
+        await ctx.send(f"✅ **Pile `{stack.name}` à jour et relancée !**")
+    else:
+        await ctx.send(f"❌ **Échec du relancement :**\n```{clip(output)}```")
 
-        # Lancement du serveur Minecraft dans tmux
-        await ctx.send("🚀 Lancement du serveur Minecraft Bedrock...")
-        result = subprocess.run(
-            ["tmux", "new-session", "-d", "-s", session_name,
-             f"bash -c 'cd {path} && ./bedrock_server; echo \"App terminé. Appuyez sur une touche pour quitter...\"; read -n1'"],
-            capture_output=True, text=True
+
+@bot.command()
+async def logs(ctx: commands.Context, name: str, lines: int = 20):
+    """Affiche les derniers logs d'une pile : !logs caddy 30"""
+    stack = await require_stack(ctx, name)
+    if stack is None:
+        return
+    code, output = await compose(stack, "logs", "--tail", str(min(lines, 100)), "--no-color")
+    if code != 0 or not output:
+        await ctx.send(f"⚠️ **Impossible de lire les logs de `{stack.name}`.**")
+        return
+    await ctx.send(f"📄 **Logs de `{stack.name}` :**\n```{clip(output)}```")
+
+
+@bot.command()
+async def status(ctx: commands.Context):
+    """État des services, température et disques"""
+    embed = discord.Embed(title="💻 McCloud — État du serveur", color=0x3FB950)
+
+    stacks = discover_stacks()
+    if stacks:
+        report = []
+        for name, path in stacks.items():
+            code, output = await compose(path, "ps", "--format", "{{.Name}}: {{.State}}", timeout=30)
+            if code != 0:
+                report.append(f"❓ `{name}` : état inconnu")
+            elif not output:
+                report.append(f"🔴 `{name}` : arrêtée")
+            else:
+                icon = "🟢" if all("running" in l for l in output.splitlines()) else "🟡"
+                report.append(f"{icon} `{name}` : {output.count(chr(10)) + 1} conteneur(s)")
+        embed.add_field(name="🐳 Services", value="\n".join(report), inline=False)
+    else:
+        embed.add_field(name="🐳 Services", value="Aucune pile trouvée", inline=False)
+
+    temp = get_cpu_temp()
+    if temp is not None:
+        icon = "🚨" if temp >= TEMP_CRITICAL_THRESHOLD else "🌡️"
+        embed.add_field(name="Température CPU", value=f"{icon} {temp:.1f}°C", inline=True)
+
+    for mount, total, used, percent in get_disk_usage():
+        embed.add_field(
+            name=f"💾 {mount}",
+            value=f"{used:.0f} / {total:.0f} Go ({percent:.0f}%)",
+            inline=True,
         )
 
-        # Log dans Discord en cas d'erreur
-        if result.stderr:
-            await ctx.send(f"⚠️ Erreur au lancement : {result.stderr[-500:]}")
+    await ctx.send(embed=embed)
 
-        await ctx.send("✅ **Serveur Minecraft Bedrock lancé !**")
-
-    except Exception as e:
-        await ctx.send(f"❌ Une erreur est survenue dans mstart : {e}")
 
 @bot.command()
-async def pstop(ctx):
-    """ Commande pour arrêter Palworld """
-    await stop_server(ctx, "palworld")
-
-@bot.command()
-async def vstop(ctx):
-    """ Commande pour arrêter Valheim """
-    await stop_server(ctx, "valheim")
-
-@bot.command()
-async def astop(ctx):
-    """ Commande pour arrêter ARK """
-    await stop_server(ctx, "ark")
-    
-@bot.command()
-async def mstop(ctx):
-    session_name = "minecraft"
-    if not check_status(session_name):
-        await ctx.send(f"⚠️ **Le serveur {session_name} n'est pas en cours d'exécution !**")
-        return
-
-    await ctx.send(f"🛑 **Arrêt du serveur {session_name}...**")
-    subprocess.run(["tmux", "kill-session", "-t", session_name], capture_output=True, text=True)
-    await ctx.send(f"✅ **Serveur {session_name} arrêté !**")
-
-@bot.command()
-async def status(ctx):
-    """ Vérifie quel serveur est en cours d'exécution """
-    running_server = get_running_server()
-    if running_server:
-        await ctx.send(f"🟢 **Le serveur {running_server} est actuellement en ligne !**")
+async def temp(ctx: commands.Context):
+    """Température CPU actuelle"""
+    temperature = get_cpu_temp()
+    if temperature is None:
+        await ctx.send("⚠️ **Impossible de lire la température CPU.**")
+    elif temperature >= TEMP_CRITICAL_THRESHOLD:
+        await ctx.send(f"🚨 **Température critique : {temperature:.1f}°C !**")
     else:
-        await ctx.send("❌ **Aucun serveur n'est en cours d'exécution.**")
+        await ctx.send(f"🌡️ **Température CPU : {temperature:.1f}°C**")
 
-### 🏁 Lancement du bot ###
+
+@bot.command()
+async def disk(ctx: commands.Context):
+    """Espace disque des volumes surveillés"""
+    usage = get_disk_usage()
+    if not usage:
+        await ctx.send("⚠️ **Aucun disque accessible.**")
+        return
+    lines = [
+        f"💾 `{mount}` : {used:.0f} / {total:.0f} Go ({percent:.0f}%)"
+        for mount, total, used, percent in usage
+    ]
+    await ctx.send("\n".join(lines))
+
+
+### 🌡️ Surveillance automatique ###
+@tasks.loop(minutes=TEMP_CHECK_MINUTES)
+async def monitor_temp():
+    channel = bot.get_channel(TEMP_LOG_CHANNEL_ID)
+    if channel is None:
+        return
+    temperature = get_cpu_temp()
+    if temperature is None:
+        return
+    # N'alerte qu'au-delà du seuil critique pour ne pas inonder le salon.
+    if temperature >= TEMP_CRITICAL_THRESHOLD:
+        await channel.send(f"🚨 **ALERTE : température critique ({temperature:.1f}°C) !**")
+
+
 @bot.event
 async def on_ready():
-    print(f"{bot.user} est connecté et surveille les serveurs !")
-    send_cpu_temp.start()
+    print(f"{bot.user} est connecté et surveille McCloud !")
+    if TEMP_LOG_CHANNEL_ID and not monitor_temp.is_running():
+        monitor_temp.start()
 
-bot.run(TOKEN)
+
+def main():
+    if not TOKEN:
+        raise SystemExit("❌ DISCORD_TOKEN manquant : copiez .env.example vers .env et remplissez-le.")
+    bot.run(TOKEN)
+
+
+if __name__ == "__main__":
+    main()
