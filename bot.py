@@ -177,6 +177,18 @@ def get_lan_ip() -> str:
         return s.getsockname()[0]
 
 
+async def get_public_ip() -> str:
+    """Adresse IP publique (dynamique, avec repli sur PUBLIC_IP du .env)."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.ipify.org", timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                return (await resp.text()).strip()
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return os.getenv("PUBLIC_IP", "?")
+
+
 async def launch_game(game: Path) -> tuple[int, str]:
     name = game.name.lower()
     await run_cmd("systemctl", "--user", "reset-failed", game_unit(name), timeout=10)
@@ -360,6 +372,36 @@ async def logs(ctx: commands.Context, name: str, lines: int = 20):
         await ctx.send(f"⚠️ **Aucun log disponible pour `{game.name}`.**")
         return
     await ctx.send(f"📄 **Logs de `{game.name}` :**\n```{clip(output)}```")
+
+
+@bot.command(name="serverlist")
+async def serverlist_cmd(ctx: commands.Context):
+    """Liste les serveurs avec adresse, ports et mot de passe"""
+    games = discover_games()
+    if not games:
+        await ctx.send(f"❌ **Aucun serveur de jeu trouvé dans `{GAME_SERVERS_DIR}`.**")
+        return
+    ip = await get_public_ip()
+    embed = discord.Embed(
+        title="🎮 McCloud Server — Liste des serveurs",
+        description=f"Adresse publique : `{ip}`",
+        color=0x3FB950,
+    )
+    for name, path in games.items():
+        conf = game_conf(path)
+        ports = game_ports(path)
+        icon = "🟢" if await game_running(name) else "🔴"
+        lines = []
+        if ports:
+            port, proto = ports[0]
+            lines.append(f"Adresse : `{ip}:{port}`")
+            lines.append("Ports : " + ", ".join(f"`{p}/{pr.lower()}`" for p, pr in ports))
+        password = conf.get("PASSWORD", "")
+        lines.append(f"Mot de passe : `{password}`" if password else "Mot de passe : aucun")
+        if conf.get("NOTE"):
+            lines.append(f"ℹ️ {conf['NOTE']}")
+        embed.add_field(name=f"{icon} {name}", value="\n".join(lines), inline=True)
+    await ctx.send(embed=embed)
 
 
 @bot.command()

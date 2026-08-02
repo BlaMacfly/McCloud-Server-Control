@@ -38,6 +38,7 @@ sans modifier le code.
 | Commande            | Action                                                 |
 |---------------------|--------------------------------------------------------|
 | `!games`            | Liste les serveurs de jeux et leur état                |
+| `!serverlist`       | Fiche de connexion : adresse, ports, mot de passe      |
 | `!start <jeu>`      | Met à jour puis démarre un serveur (`!start palworld`) |
 | `!stop <jeu>`       | Arrête puis sauvegarde un serveur (`!stop palworld`)   |
 | `!restart <jeu>`    | Arrête, sauvegarde, met à jour, relance                |
@@ -72,6 +73,8 @@ APPID=2394010          # AppID Steam du serveur dédié (mise à jour au !start)
 PLATFORM=linux         # linux ou windows (windows = serveur lancé via Wine)
 PORTS=8211/udp         # ports ouverts via UPnP pendant que le serveur tourne
 SAVE_DIRS=Pal/Saved    # dossiers/fichiers archivés à chaque !stop
+PASSWORD=motdepasse    # affiché par !serverlist (informatif uniquement)
+NOTE=Texte libre       # note affichée par !serverlist
 ```
 
 Exemple de `start.sh` pour Minecraft Bedrock :
