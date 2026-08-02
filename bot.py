@@ -283,7 +283,13 @@ async def do_start(ctx: commands.Context, game: Path):
 
 
 async def do_stop(ctx: commands.Context, game: Path):
-    """Sauvegarde puis arrête le serveur."""
+    """Arrête le serveur puis sauvegarde (fichiers au repos, backup fiable)."""
+    await ctx.send(f"🛑 **Arrêt de `{game.name}`…**")
+    code, output = await run_cmd("systemctl", "--user", "stop", game_unit(game.name.lower()), timeout=90)
+    if code == 0:
+        await ctx.send(f"✅ **Serveur `{game.name}` arrêté !**")
+    else:
+        await ctx.send(f"❌ **Échec de l'arrêt :**\n```{clip(output)}```")
     await ctx.send(f"💾 **Sauvegarde de `{game.name}`…**")
     backup = await backup_game(game)
     if backup:
@@ -291,12 +297,6 @@ async def do_stop(ctx: commands.Context, game: Path):
         await ctx.send(f"✅ **Backup créé : `{archive.name}` ({size:.0f} Mo)**")
     else:
         await ctx.send(f"⚠️ **Rien à sauvegarder pour `{game.name}`.**")
-    await ctx.send(f"🛑 **Arrêt de `{game.name}`…**")
-    code, output = await run_cmd("systemctl", "--user", "stop", game_unit(game.name.lower()), timeout=90)
-    if code == 0:
-        await ctx.send(f"✅ **Serveur `{game.name}` arrêté !**")
-    else:
-        await ctx.send(f"❌ **Échec de l'arrêt :**\n```{clip(output)}```")
 
 
 @bot.command()
@@ -315,7 +315,7 @@ async def start(ctx: commands.Context, name: str):
 @bot.command()
 @authorized()
 async def stop(ctx: commands.Context, name: str):
-    """Sauvegarde puis arrête un serveur : !stop palworld"""
+    """Arrête puis sauvegarde un serveur : !stop palworld"""
     game = await require_game(ctx, name)
     if game is None:
         return
@@ -328,7 +328,7 @@ async def stop(ctx: commands.Context, name: str):
 @bot.command()
 @authorized()
 async def restart(ctx: commands.Context, name: str):
-    """Sauvegarde, met à jour et relance un serveur : !restart palworld"""
+    """Arrête, sauvegarde, met à jour et relance : !restart palworld"""
     game = await require_game(ctx, name)
     if game is None:
         return

@@ -18,8 +18,8 @@ sans modifier le code.
 - 🎮 Lancement, arrêt et redémarrage des serveurs de jeux via Discord
 - ⬆️ Vérification et application des mises à jour SteamCMD à chaque `!start`
   (sans `validate` : les configurations locales ne sont jamais écrasées)
-- 💾 Backup automatique des sauvegardes à chaque `!stop` (rotation, 10 archives
-  conservées par jeu)
+- 💾 Backup automatique à chaque `!stop`, effectué après l'arrêt du serveur
+  pour garantir des fichiers cohérents (rotation, 10 archives par jeu)
 - 🔍 Détection automatique des jeux installés (un dossier + un `start.sh`)
 - 🧰 Exécution en unités systemd utilisateur — pas besoin de `tmux` ni de root
 - 🔓 Ouverture automatique des ports sur la box via UPnP au lancement d'un
@@ -39,8 +39,8 @@ sans modifier le code.
 |---------------------|--------------------------------------------------------|
 | `!games`            | Liste les serveurs de jeux et leur état                |
 | `!start <jeu>`      | Met à jour puis démarre un serveur (`!start palworld`) |
-| `!stop <jeu>`       | Sauvegarde puis arrête un serveur (`!stop palworld`)   |
-| `!restart <jeu>`    | Sauvegarde, met à jour et relance (`!restart palworld`)|
+| `!stop <jeu>`       | Arrête puis sauvegarde un serveur (`!stop palworld`)   |
+| `!restart <jeu>`    | Arrête, sauvegarde, met à jour, relance                |
 | `!logs <jeu> [n]`   | Affiche les `n` dernières lignes de logs (20 défaut)   |
 | `!status`           | État des serveurs, température CPU et disques          |
 | `!temp`             | Température CPU actuelle                               |
