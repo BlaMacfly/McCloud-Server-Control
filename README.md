@@ -46,6 +46,7 @@ sans modifier le code.
 | `!status`           | État des serveurs, température CPU et disques          |
 | `!temp`             | Température CPU actuelle                               |
 | `!disk`             | Espace disque des volumes surveillés                   |
+| `!help`             | Liste des commandes (alias : `!info`, `!command`)      |
 
 ---
 

@@ -42,7 +42,7 @@ ALLOWED_USER_IDS = {
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
 ### 🔧 Utilitaires ###
@@ -463,6 +463,31 @@ async def disk(ctx: commands.Context):
         for mount, total, used, percent in usage
     ]
     await ctx.send("\n".join(lines))
+
+
+HELP_SECTIONS = [
+    ("🎮 Serveurs de jeux", ["games", "serverlist", "start", "stop", "restart", "logs"]),
+    ("📊 Surveillance", ["status", "temp", "disk"]),
+    ("❓ Aide", ["help"]),
+]
+
+
+@bot.command(name="help", aliases=["info", "command", "commands", "aide"])
+async def help_cmd(ctx: commands.Context):
+    """Affiche la liste des commandes (!help, !info, !command)"""
+    embed = discord.Embed(
+        title="💻 McCloud Server Control — Commandes",
+        description="Préfixe : `!` — exemple : `!start palworld`",
+        color=0x3FB950,
+    )
+    for section, names in HELP_SECTIONS:
+        lines = [
+            f"`!{n}` — {bot.get_command(n).help}"
+            for n in names
+            if bot.get_command(n) and bot.get_command(n).help
+        ]
+        embed.add_field(name=section, value="\n".join(lines), inline=False)
+    await ctx.send(embed=embed)
 
 
 ### 🌡️ Surveillance automatique ###
